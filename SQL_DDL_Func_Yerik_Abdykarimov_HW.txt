@@ -1,9 +1,6 @@
-===============================================================================
-TASK 6 – Analysis of Existing Functions in the dvd_rental Database
-Author  : Yerik Abdykarimov
-File    : SQL_DDL_Func_Yerik_Abdykarimov_HW.txt
-===============================================================================
 
+TASK 6 – Analysis of Existing Functions in the dvd_rental Database
+Yerik Abdykarimov
 
 -------------------------------------------------------------------------------
 QUESTION 1
@@ -12,7 +9,7 @@ What operations do the following functions perform?
  get_customer_balance, inventory_held_by_customer, rewards_report, last_day)
 -------------------------------------------------------------------------------
 
-► film_in_stock(p_film_id INTEGER, p_store_id INTEGER)
+-- film_in_stock(p_film_id INTEGER, p_store_id INTEGER)
   Returns a SETOF INTEGER (inventory_id values).
   Code logic:
     SELECT inventory_id
@@ -26,13 +23,13 @@ What operations do the following functions perform?
   The OUT parameter p_film_count is implicitly set to the number of rows returned
   by the SETOF mechanism.
 
-► film_not_in_stock(p_film_id INTEGER, p_store_id INTEGER)
+-- film_not_in_stock(p_film_id INTEGER, p_store_id INTEGER)
   Mirror image of film_in_stock.  Identical table/filter logic but negates the
   in-stock predicate:
     AND NOT inventory_in_stock(inventory_id);
   Returns inventory_ids that are currently checked out by a customer.
 
-► inventory_in_stock(p_inventory_id INTEGER)
+-- inventory_in_stock(p_inventory_id INTEGER)
   Returns BOOLEAN. Two-step logic in the code:
     Step 1: SELECT count(*) FROM rental WHERE inventory_id = p_inventory_id;
             If result = 0  → item was never rented → RETURN TRUE immediately.
@@ -46,7 +43,7 @@ What operations do the following functions perform?
   inventory_id is already known; a plain COUNT on the rental table would
   produce the same result with one fewer table access.
 
-► inventory_held_by_customer(p_inventory_id INTEGER)
+-- inventory_held_by_customer(p_inventory_id INTEGER)
   Returns INTEGER (customer_id) or NULL.
   Code logic:
     SELECT customer_id INTO v_customer_id
@@ -58,7 +55,7 @@ What operations do the following functions perform?
   Assumes at most one open rental per inventory copy, which is enforced by
   the business rules (you cannot rent an item that is already out).
 
-► get_customer_balance(p_customer_id INTEGER,
+-- get_customer_balance(p_customer_id INTEGER,
                        p_effective_date TIMESTAMP WITH TIME ZONE)
   Returns NUMERIC.  Calculates outstanding balance in three steps:
     v_rentfees  = SUM(film.rental_rate) for all rentals where
@@ -76,7 +73,7 @@ What operations do the following functions perform?
   Returns: v_rentfees + v_overfees - v_payments.
   (See Question 5 for the missing business rule.)
 
-► rewards_report(min_monthly_purchases INTEGER,
+-- rewards_report(min_monthly_purchases INTEGER,
                  min_dollar_amount_purchased NUMERIC)
   Returns SETOF customer.
   Intended to return customers who, in the previous month, both made more than
@@ -92,7 +89,7 @@ What operations do the following functions perform?
     6. EXECUTEs a SELECT joining tmpCustomer to customer, looping with RETURN NEXT.
     7. EXECUTEs DROP TABLE tmpCustomer to clean up.
 
-► last_day(TIMESTAMP WITH TIME ZONE)
+-- last_day(TIMESTAMP WITH TIME ZONE)
   Returns DATE (last calendar day of the month containing the input timestamp).
   Code logic (IMMUTABLE STRICT SQL function):
     CASE
@@ -242,7 +239,7 @@ QUESTION 4
 Which functions violate best practices?
 -------------------------------------------------------------------------------
 
-► rewards_report – three violations:
+-- rewards_report – three violations:
 
   1. Dynamic SQL (EXECUTE) for a static query.
      The SQL assembled in tmpSQL has no dynamic table names, column names, or
@@ -264,17 +261,17 @@ Which functions violate best practices?
      NULL > min_monthly_purchases in the HAVING clause is also NULL, meaning
      no rows are filtered – potentially returning all customers.
 
-► inventory_in_stock – efficiency violation:
+-- inventory_in_stock – efficiency violation:
   Step 2 joins inventory back to itself via inventory_id, which is a redundant
   lookup.  The function also makes two separate COUNT queries (two round-trips
   through the planner) where one NOT EXISTS would suffice.
 
-► get_customer_balance – incomplete implementation (see Question 5).
+-- get_customer_balance – incomplete implementation (see Question 5).
   The function documents four business rules in its own comments but only
   implements three of them.  Shipping code that contradicts its own spec is
   a documentation / correctness best-practice violation.
 
-► last_day – minor readability violation:
+-- last_day – minor readability violation:
   Uses explicit pg_catalog schema-qualified operators
   (EXTRACT(YEAR …) operator(pg_catalog.||) '-01-01') instead of the simpler
   DATE_TRUNC approach available since PostgreSQL 8.4.  Correct, but harder to
@@ -389,7 +386,7 @@ QUESTION 6
 How do group_concat and _group_concat work? Where are they used?
 -------------------------------------------------------------------------------
 
-► _group_concat(text, text)  – SQL scalar function, IMMUTABLE
+-- _group_concat(text, text)  – SQL scalar function, IMMUTABLE
   This is the state-transition function (SFUNC) of the group_concat aggregate.
   It is never called directly by application code; PostgreSQL calls it once
   per row during aggregation to update the running state.
@@ -401,7 +398,7 @@ How do group_concat and _group_concat work? Where are they used?
     END
   $1 = current accumulated string (state), $2 = next value to append.
 
-► group_concat(text)  – custom AGGREGATE
+-- group_concat(text)  – custom AGGREGATE
   Definition:
     CREATE AGGREGATE group_concat(text) (
         SFUNC = _group_concat,
@@ -429,7 +426,7 @@ QUESTION 7
 What does last_updated do? Where is it used?
 -------------------------------------------------------------------------------
 
-► last_updated()  – TRIGGER FUNCTION (plpgsql, RETURNS trigger)
+-- last_updated()  – TRIGGER FUNCTION (plpgsql, RETURNS trigger)
   Code body:
     BEGIN
         NEW.last_update = CURRENT_TIMESTAMP;
@@ -497,7 +494,7 @@ QUESTION 9
 Can any function produce incorrect results? Why?
 -------------------------------------------------------------------------------
 
-► get_customer_balance – YES, incorrect (understated) results before the fix.
+-- get_customer_balance – YES, incorrect (understated) results before the fix.
   Business Rule 3 ("if overdue > rental_duration * 2 days, charge replacement_cost")
   is documented in the function's own comments but absent from the code.
   For a customer who returned a film two weeks late on a 3-day rental:
@@ -506,7 +503,7 @@ Can any function produce incorrect results? Why?
     • The corrected logic charges replacement_cost instead.
   The original balance is therefore lower than it should be for such customers.
 
-► rewards_report – YES, wrong customers are returned.
+-- rewards_report – YES, wrong customers are returned.
   Because the interval is '3 month' instead of '1 month':
   - A customer who qualified LAST month but NOT three months ago is
     incorrectly EXCLUDED from the rewards list.
@@ -517,11 +514,7 @@ Can any function produce incorrect results? Why?
   HAVING clause's NULL comparisons suppress all filtering, potentially
   returning every customer in the table.
 
-► All other analysed functions produce correct results for their stated purpose:
+-- All other analysed functions produce correct results for their stated purpose:
   film_in_stock, film_not_in_stock, inventory_in_stock (logically correct,
   though inefficient), inventory_held_by_customer, last_day, last_updated,
   group_concat, _group_concat.
-
-===============================================================================
-END OF FILE
-===============================================================================
