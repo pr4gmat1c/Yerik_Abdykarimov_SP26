@@ -1,0 +1,520 @@
+
+TASK 6 – Analysis of Existing Functions in the dvd_rental Database
+Yerik Abdykarimov
+
+-------------------------------------------------------------------------------
+QUESTION 1
+What operations do the following functions perform?
+(film_in_stock, film_not_in_stock, inventory_in_stock,
+ get_customer_balance, inventory_held_by_customer, rewards_report, last_day)
+-------------------------------------------------------------------------------
+
+-- film_in_stock(p_film_id INTEGER, p_store_id INTEGER)
+  Returns a SETOF INTEGER (inventory_id values).
+  Code logic:
+    SELECT inventory_id
+    FROM   inventory
+    WHERE  film_id  = $1
+      AND  store_id = $2
+      AND  inventory_in_stock(inventory_id);
+  It queries the inventory table for every copy of the given film at the given
+  store, then delegates the availability check to inventory_in_stock().
+  Only copies that pass that check (i.e., currently not rented out) are returned.
+  The OUT parameter p_film_count is implicitly set to the number of rows returned
+  by the SETOF mechanism.
+
+-- film_not_in_stock(p_film_id INTEGER, p_store_id INTEGER)
+  Mirror image of film_in_stock.  Identical table/filter logic but negates the
+  in-stock predicate:
+    AND NOT inventory_in_stock(inventory_id);
+  Returns inventory_ids that are currently checked out by a customer.
+
+-- inventory_in_stock(p_inventory_id INTEGER)
+  Returns BOOLEAN. Two-step logic in the code:
+    Step 1: SELECT count(*) FROM rental WHERE inventory_id = p_inventory_id;
+            If result = 0  → item was never rented → RETURN TRUE immediately.
+    Step 2: SELECT COUNT(rental_id)
+            FROM inventory LEFT JOIN rental USING(inventory_id)
+            WHERE inventory.inventory_id = p_inventory_id
+              AND rental.return_date IS NULL;
+            If result > 0  → item is currently out → RETURN FALSE.
+            Else           → all rentals returned   → RETURN TRUE.
+  Note: The LEFT JOIN back to inventory in Step 2 is redundant because the
+  inventory_id is already known; a plain COUNT on the rental table would
+  produce the same result with one fewer table access.
+
+-- inventory_held_by_customer(p_inventory_id INTEGER)
+  Returns INTEGER (customer_id) or NULL.
+  Code logic:
+    SELECT customer_id INTO v_customer_id
+    FROM   rental
+    WHERE  return_date IS NULL
+      AND  inventory_id = p_inventory_id;
+  Finds the customer who currently holds the item by looking for an open
+  rental (return_date IS NULL).  Returns NULL if no open rental exists.
+  Assumes at most one open rental per inventory copy, which is enforced by
+  the business rules (you cannot rent an item that is already out).
+
+-- get_customer_balance(p_customer_id INTEGER,
+                       p_effective_date TIMESTAMP WITH TIME ZONE)
+  Returns NUMERIC.  Calculates outstanding balance in three steps:
+    v_rentfees  = SUM(film.rental_rate) for all rentals where
+                  rental_date <= p_effective_date AND customer_id = p_customer_id.
+                  (All rental fees charged at the time of renting.)
+
+    v_overfees  = SUM of $1 per overdue day for rentals where
+                  (return_date - rental_date) > (rental_duration * 1 day),
+                  using EXTRACT(epoch …)::INT / 86400 to convert the excess
+                  interval to whole days.
+
+    v_payments  = SUM(payment.amount) where payment_date <= p_effective_date
+                  AND customer_id = p_customer_id.
+
+  Returns: v_rentfees + v_overfees - v_payments.
+  (See Question 5 for the missing business rule.)
+
+-- rewards_report(min_monthly_purchases INTEGER,
+                 min_dollar_amount_purchased NUMERIC)
+  Returns SETOF customer.
+  Intended to return customers who, in the previous month, both made more than
+  min_monthly_purchases transactions AND spent more than min_dollar_amount_purchased.
+  Code flow:
+    1. Computes last_month_start = first day of the month 3 months ago
+       (BUG: should be 1 month, not 3).
+    2. Computes last_month_end   = last_day(last_month_start).
+    3. Creates a temporary table tmpCustomer.
+    4. Builds a dynamic SQL string (tmpSQL) that INSERTs qualifying customer_ids
+       (those meeting both thresholds in that date range) into tmpCustomer.
+    5. EXECUTEs that INSERT.
+    6. EXECUTEs a SELECT joining tmpCustomer to customer, looping with RETURN NEXT.
+    7. EXECUTEs DROP TABLE tmpCustomer to clean up.
+
+-- last_day(TIMESTAMP WITH TIME ZONE)
+  Returns DATE (last calendar day of the month containing the input timestamp).
+  Code logic (IMMUTABLE STRICT SQL function):
+    CASE
+      WHEN EXTRACT(MONTH FROM $1) = 12
+      THEN (EXTRACT(YEAR FROM $1) + 1 || '-01-01')::date - INTERVAL '1 day'
+      ELSE (EXTRACT(YEAR FROM $1) || '-' || EXTRACT(MONTH FROM $1)+1 || '-01')::date
+           - INTERVAL '1 day'
+    END
+  For December it shifts to January of the next year and subtracts a day.
+  For any other month it advances to the first of the next month and subtracts
+  a day.  STRICT means it returns NULL immediately if the argument is NULL.
+
+
+-------------------------------------------------------------------------------
+QUESTION 2
+Why does rewards_report return 0 rows?
+Correct and recreate the function so it returns rows properly.
+-------------------------------------------------------------------------------
+
+ROOT CAUSES (from the actual code):
+
+  Bug 1 – Wrong interval (line in the function body):
+    last_month_start := CURRENT_DATE - '3 month'::interval;
+  The variable is named "last_month" but the offset is 3 months, not 1.
+  This makes the function query the wrong month entirely.
+
+  Bug 2 – Stale dataset:
+  The dvdrental payment data only covers 2017.  Even if the interval were
+  corrected to '1 month', CURRENT_DATE in 2026 resolves to a 2025/2026 date
+  for which no payments exist.  The tmpCustomer table is always empty.
+
+  Additional problem – temp table collision:
+  If the function crashes between CREATE TEMPORARY TABLE and the final
+  EXECUTE 'DROP TABLE tmpCustomer', the next call fails with
+  "relation tmpCustomer already exists" because the temp table persists
+  for the lifetime of the session.
+
+CORRECTED FUNCTION:
+
+CREATE OR REPLACE FUNCTION public.rewards_report(
+    min_monthly_purchases       INTEGER,
+    min_dollar_amount_purchased NUMERIC,
+    p_effective_date            DATE DEFAULT CURRENT_DATE
+)
+RETURNS SETOF public.customer
+LANGUAGE plpgsql SECURITY DEFINER
+AS $$
+/*
+ * Fixes applied vs. original:
+ *   1. Interval corrected from '3 month' to '1 month'.
+ *   2. Added p_effective_date parameter (default CURRENT_DATE) so the
+ *      function can be tested against the 2017 dataset:
+ *        SELECT * FROM public.rewards_report(5, 40.00, '2017-05-01');
+ *      This queries April 2017 (the month before 2017-05-01), which has data.
+ *   3. Temporary table + dynamic SQL removed; replaced by a static correlated
+ *      subquery – safer (no injection surface), faster (plan cached), and
+ *      immune to temp-table collision errors.
+ *   4. DATE_TRUNC used for reliable month-boundary arithmetic.
+ *
+ * TEST QUERIES:
+ *   -- Valid (returns rows from April 2017):
+ *   SELECT * FROM public.rewards_report(5, 40.00, '2017-05-01');
+ *
+ *   -- Edge – thresholds too high (0 rows expected):
+ *   SELECT * FROM public.rewards_report(999, 9999.00, '2017-05-01');
+ *
+ *   -- Edge – min_monthly_purchases = 0 (exception expected):
+ *   SELECT * FROM public.rewards_report(0, 10.00, '2017-05-01');
+ */
+DECLARE
+    last_month_start DATE;
+    last_month_end   DATE;
+BEGIN
+    IF min_monthly_purchases = 0 THEN
+        RAISE EXCEPTION 'Minimum monthly purchases parameter must be > 0';
+    END IF;
+    IF min_dollar_amount_purchased = 0.00 THEN
+        RAISE EXCEPTION 'Minimum monthly dollar amount purchased parameter must be > $0.00';
+    END IF;
+
+    -- First and last day of the month immediately before p_effective_date
+    last_month_start := DATE_TRUNC('month',
+                            p_effective_date - INTERVAL '1 month')::DATE;
+    last_month_end   := (DATE_TRUNC('month',
+                            p_effective_date) - INTERVAL '1 day')::DATE;
+
+    RETURN QUERY
+    SELECT c.*
+    FROM   customer c
+    WHERE  c.customer_id IN (
+        SELECT p.customer_id
+        FROM   payment p
+        WHERE  DATE(p.payment_date) BETWEEN last_month_start AND last_month_end
+        GROUP  BY p.customer_id
+        HAVING COUNT(p.customer_id) > min_monthly_purchases
+           AND SUM(p.amount)        > min_dollar_amount_purchased
+    );
+END;
+$$;
+
+
+-------------------------------------------------------------------------------
+QUESTION 3
+Is there any function that can potentially be removed (inefficient / redundant)?
+-------------------------------------------------------------------------------
+
+CANDIDATE: inventory_in_stock(p_inventory_id INTEGER)
+
+Reason – redundant two-step logic:
+  Step 1 counts ALL rental rows for the item.  If 0, returns TRUE.
+  Step 2 then counts open rentals using:
+    SELECT COUNT(rental_id)
+    FROM inventory LEFT JOIN rental USING(inventory_id)
+    WHERE inventory.inventory_id = p_inventory_id
+      AND rental.return_date IS NULL;
+  Joining back to inventory here is pointless: p_inventory_id is already a
+  known scalar value.  The LEFT JOIN forces an extra index lookup on the
+  inventory primary key for no benefit.
+
+  The entire function can be replaced by a single expression:
+    NOT EXISTS (
+        SELECT 1 FROM rental
+        WHERE  inventory_id = p_inventory_id
+          AND  return_date  IS NULL
+    )
+  This uses one index scan on (inventory_id, return_date), is easier to read,
+  and eliminates the two-step conditional branch.
+
+  Because film_in_stock and film_not_in_stock both delegate to
+  inventory_in_stock, they would automatically benefit from this simplification.
+
+SECONDARY CANDIDATE: inventory_held_by_customer(p_inventory_id INTEGER)
+
+  Its entire body is:
+    SELECT customer_id INTO v_customer_id
+    FROM rental
+    WHERE return_date IS NULL AND inventory_id = p_inventory_id;
+    RETURN v_customer_id;
+  This is a one-liner that any caller could write inline.  The function adds
+  no abstraction beyond a single-row SELECT, and the extra function-call
+  overhead (stack frame, plan lookup) outweighs any benefit for a function
+  this trivial.
+
+
+-------------------------------------------------------------------------------
+QUESTION 4
+Which functions violate best practices?
+-------------------------------------------------------------------------------
+
+-- rewards_report – three violations:
+
+  1. Dynamic SQL (EXECUTE) for a static query.
+     The SQL assembled in tmpSQL has no dynamic table names, column names, or
+     operators.  The only variable parts are the date literals and threshold
+     values, which can be passed as parameters to a static query.
+     Dynamic SQL bypasses plan caching, requires re-parsing and re-planning
+     on every call, and introduces an unnecessary SQL-injection surface
+     (even though inputs are typed as INT/NUMERIC, it is still bad practice).
+
+  2. Temporary table created and dropped inside the function.
+     If the function raises an exception between the CREATE and the DROP
+     EXECUTE, the temp table remains for the session lifetime, causing
+     "relation tmpCustomer already exists" on the next call.
+     A CTE or subquery eliminates this fragility entirely.
+
+  3. NULL parameters bypass sanity checks.
+     The guard  IF min_monthly_purchases = 0  evaluates to NULL (not TRUE)
+     when the argument is NULL, so the check is silently skipped.
+     NULL > min_monthly_purchases in the HAVING clause is also NULL, meaning
+     no rows are filtered – potentially returning all customers.
+
+-- inventory_in_stock – efficiency violation:
+  Step 2 joins inventory back to itself via inventory_id, which is a redundant
+  lookup.  The function also makes two separate COUNT queries (two round-trips
+  through the planner) where one NOT EXISTS would suffice.
+
+-- get_customer_balance – incomplete implementation (see Question 5).
+  The function documents four business rules in its own comments but only
+  implements three of them.  Shipping code that contradicts its own spec is
+  a documentation / correctness best-practice violation.
+
+-- last_day – minor readability violation:
+  Uses explicit pg_catalog schema-qualified operators
+  (EXTRACT(YEAR …) operator(pg_catalog.||) '-01-01') instead of the simpler
+  DATE_TRUNC approach available since PostgreSQL 8.4.  Correct, but harder to
+  maintain and review.
+
+
+-------------------------------------------------------------------------------
+QUESTION 5
+The get_customer_balance function describes business requirements in its
+comments but not all are implemented. Correct the function.
+-------------------------------------------------------------------------------
+
+MISSING RULE (Rule 3 from the function's own comment block):
+  "IF A FILM IS MORE THAN RENTAL_DURATION * 2 OVERDUE,
+   CHARGE THE REPLACEMENT_COST"
+
+The original code accumulates $1/day for ALL overdue days regardless of
+how overdue the film is.  Once a film is overdue by more than
+rental_duration * 2 days the replacement cost should be charged instead
+(the per-day fee no longer applies beyond that threshold).
+
+Result of the bug: customers who return a film extremely late are charged
+only the per-day overdue fee when they should also (or instead) be charged
+the full replacement cost.  Their balance is UNDERSTATED.
+
+CORRECTED FUNCTION:
+
+CREATE OR REPLACE FUNCTION public.get_customer_balance(
+    p_customer_id    INTEGER,
+    p_effective_date TIMESTAMP WITH TIME ZONE
+)
+RETURNS NUMERIC
+LANGUAGE plpgsql
+AS $$
+/*
+ * Change vs. original:
+ *   • v_overfees now only accumulates the daily fee for items overdue
+ *     WITHIN the rental_duration * 2 window.
+ *   • v_replacement (new variable) adds replacement_cost for items overdue
+ *     BEYOND rental_duration * 2 days (Rule 3 from the comments).
+ *
+ * TEST QUERIES:
+ *   -- Customer 1 balance as of end of January 2017:
+ *   SELECT public.get_customer_balance(1, '2017-01-31 23:59:59+00');
+ *
+ *   -- Non-existent customer (should return 0.00):
+ *   SELECT public.get_customer_balance(9999, NOW());
+ */
+DECLARE
+    v_rentfees    DECIMAL(5,2);
+    v_overfees    INTEGER;
+    v_replacement DECIMAL(7,2);
+    v_payments    DECIMAL(5,2);
+BEGIN
+    -- Rule 1: base rental fees for all rentals up to p_effective_date
+    SELECT COALESCE(SUM(film.rental_rate), 0)
+    INTO   v_rentfees
+    FROM   film
+    JOIN   inventory ON film.film_id          = inventory.film_id
+    JOIN   rental    ON inventory.inventory_id = rental.inventory_id
+    WHERE  rental.rental_date <= p_effective_date
+      AND  rental.customer_id  = p_customer_id;
+
+    -- Rule 2: $1/day late fee – only for items overdue but NOT past
+    --         the double-duration threshold
+    SELECT COALESCE(SUM(
+        CASE
+            WHEN (rental.return_date - rental.rental_date) >
+                 (film.rental_duration * '1 day'::interval)
+             AND (rental.return_date - rental.rental_date) <=
+                 (film.rental_duration * 2 * '1 day'::interval)
+            THEN EXTRACT(epoch FROM (
+                     (rental.return_date - rental.rental_date)
+                     - (film.rental_duration * '1 day'::interval)
+                 ))::INTEGER / 86400
+            ELSE 0
+        END
+    ), 0)
+    INTO   v_overfees
+    FROM   rental
+    JOIN   inventory ON rental.inventory_id  = inventory.inventory_id
+    JOIN   film      ON inventory.film_id    = film.film_id
+    WHERE  rental.rental_date <= p_effective_date
+      AND  rental.customer_id  = p_customer_id;
+
+    -- Rule 3 (PREVIOUSLY MISSING): replacement cost for items overdue by
+    --         more than rental_duration * 2 days
+    SELECT COALESCE(SUM(film.replacement_cost), 0)
+    INTO   v_replacement
+    FROM   rental
+    JOIN   inventory ON rental.inventory_id  = inventory.inventory_id
+    JOIN   film      ON inventory.film_id    = film.film_id
+    WHERE  rental.rental_date <= p_effective_date
+      AND  rental.customer_id  = p_customer_id
+      AND  (rental.return_date - rental.rental_date) >
+           (film.rental_duration * 2 * '1 day'::interval);
+
+    -- Rule 4: subtract all payments made on or before p_effective_date
+    SELECT COALESCE(SUM(payment.amount), 0)
+    INTO   v_payments
+    FROM   payment
+    WHERE  payment.payment_date <= p_effective_date
+      AND  payment.customer_id   = p_customer_id;
+
+    RETURN v_rentfees + v_overfees + v_replacement - v_payments;
+END;
+$$;
+
+
+-------------------------------------------------------------------------------
+QUESTION 6
+How do group_concat and _group_concat work? Where are they used?
+-------------------------------------------------------------------------------
+
+-- _group_concat(text, text)  – SQL scalar function, IMMUTABLE
+  This is the state-transition function (SFUNC) of the group_concat aggregate.
+  It is never called directly by application code; PostgreSQL calls it once
+  per row during aggregation to update the running state.
+  Logic from the code:
+    SELECT CASE
+      WHEN $2 IS NULL THEN $1        -- new value is NULL → keep existing state
+      WHEN $1 IS NULL THEN $2        -- state is NULL (first row) → initialise
+      ELSE $1 || ', ' || $2          -- both non-NULL → append with ", " separator
+    END
+  $1 = current accumulated string (state), $2 = next value to append.
+
+-- group_concat(text)  – custom AGGREGATE
+  Definition:
+    CREATE AGGREGATE group_concat(text) (
+        SFUNC = _group_concat,
+        STYPE = text
+    );
+  Concatenates all non-NULL text values within a GROUP BY group into a single
+  comma-space-separated string.  Functionally identical to
+  STRING_AGG(expr, ', ') (available since PostgreSQL 9.0), which could replace
+  it entirely.  The state starts as NULL (no INITCOND), so the first non-NULL
+  value seeds the string.
+
+WHERE THEY ARE USED (from the existing schema):
+  • public.actor_info VIEW – concatenates "CategoryName: film1, film2, …"
+    per actor across all categories they have appeared in.
+  • public.film_list VIEW – concatenates "FirstName LastName" for all actors
+    per film.
+  • public.nicer_but_slower_film_list VIEW – same as film_list but actor names
+    are title-cased (upper first letter of each part, lower rest) using
+    upper(substring(…,1,1)) || lower(substring(…,2)) expressions; hence the
+    "slower" label (substring + upper + lower called per actor per film).
+
+
+-------------------------------------------------------------------------------
+QUESTION 7
+What does last_updated do? Where is it used?
+-------------------------------------------------------------------------------
+
+-- last_updated()  – TRIGGER FUNCTION (plpgsql, RETURNS trigger)
+  Code body:
+    BEGIN
+        NEW.last_update = CURRENT_TIMESTAMP;
+        RETURN NEW;
+    END
+  Before a row is written by an UPDATE statement, this function sets the
+  last_update column of that row to the current transaction timestamp.
+  It is an audit / change-tracking pattern: after any UPDATE the column
+  always reflects the exact time of the most recent modification.
+  RETURN NEW passes the modified row on to the actual storage engine.
+
+WHERE IT IS USED (as a BEFORE UPDATE FOR EACH ROW trigger named "last_updated"):
+  actor, address, category, city, country, customer,
+  film, film_actor, film_category, inventory, language,
+  rental, staff, store
+  – every core table in the dvdrental schema except payment (payment rows
+  are inserted but not typically updated after the fact).
+
+
+-------------------------------------------------------------------------------
+QUESTION 8
+What is tmpSQL in rewards_report?
+Can the function be recreated without EXECUTE / dynamic SQL? Why?
+-------------------------------------------------------------------------------
+
+tmpSQL is a TEXT variable declared at the top of rewards_report.  It is used to
+hold SQL statement strings assembled at runtime using string concatenation of
+date literals (quote_literal) and threshold values.  Three EXECUTE calls consume
+it during the function:
+
+  1. EXECUTE of an INSERT … SELECT that populates tmpCustomer with qualifying
+     customer_ids.
+  2. EXECUTE of a SELECT … JOIN that reads back from tmpCustomer and loops
+     over results with RETURN NEXT.
+  3. EXECUTE 'DROP TABLE tmpCustomer' to clean up.
+
+CAN IT BE RECREATED WITHOUT EXECUTE / DYNAMIC SQL?
+Yes – completely.  The SQL assembled in tmpSQL contains:
+  • Fixed table names  (payment, tmpCustomer, customer)
+  • Fixed column names (customer_id, payment_date, amount)
+  • Variable filter values (date range, thresholds) – these are just
+    PL/pgSQL variables that can be passed directly to a static query
+
+None of these require dynamic SQL.  A static RETURN QUERY with a
+correlated subquery achieves the identical result (see corrected function
+in Question 2 above).
+
+WHY DYNAMIC SQL WAS USED ORIGINALLY:
+The dvdrental schema was ported from MySQL, where passing local variables
+directly into prepared-statement predicates was more restrictive.  Dynamic
+SQL was a copy-over workaround that is unnecessary in PostgreSQL.
+
+PROBLEMS CAUSED BY KEEPING DYNAMIC SQL:
+  1. Performance: PostgreSQL cannot cache the query plan; it re-parses and
+     re-plans every EXECUTE call.
+  2. Fragility: if the function exits abnormally before 'DROP TABLE tmpCustomer'
+     is executed, the temp table persists for the session and the next call
+     raises "relation tmpCustomer already exists".
+  3. Maintainability: string concatenation with quote_literal is harder to read,
+     test, and refactor than a plain static query.
+
+
+-------------------------------------------------------------------------------
+QUESTION 9
+Can any function produce incorrect results? Why?
+-------------------------------------------------------------------------------
+
+-- get_customer_balance – YES, incorrect (understated) results before the fix.
+  Business Rule 3 ("if overdue > rental_duration * 2 days, charge replacement_cost")
+  is documented in the function's own comments but absent from the code.
+  For a customer who returned a film two weeks late on a 3-day rental:
+    • The overdue days exceed rental_duration * 2 = 6 days.
+    • The original code still charges only $1/day for those excess days.
+    • The corrected logic charges replacement_cost instead.
+  The original balance is therefore lower than it should be for such customers.
+
+-- rewards_report – YES, wrong customers are returned.
+  Because the interval is '3 month' instead of '1 month':
+  - A customer who qualified LAST month but NOT three months ago is
+    incorrectly EXCLUDED from the rewards list.
+  - A customer who qualified three months ago but NOT last month is
+    incorrectly INCLUDED.
+  Additionally, passing NULL for either numeric parameter bypasses the
+  sanity guards (NULL = 0 evaluates to NULL, not TRUE in SQL), and the
+  HAVING clause's NULL comparisons suppress all filtering, potentially
+  returning every customer in the table.
+
+-- All other analysed functions produce correct results for their stated purpose:
+  film_in_stock, film_not_in_stock, inventory_in_stock (logically correct,
+  though inefficient), inventory_held_by_customer, last_day, last_updated,
+  group_concat, _group_concat.
