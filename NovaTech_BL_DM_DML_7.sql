@@ -28,6 +28,9 @@
 -- -------------------------------------------------------------------------
 -- SECTION A — DEFAULT ROWS
 -- surr_id = -1, text = 'Manual', numbers = -1, dates = '1900-01-01'.
+-- source_system / source_entity = 'Manual' (record was manually introduced).
+-- All attribute columns (_src_id, names, codes, flags) = 'n.a.' since no
+-- real value exists for a default row.
 -- FCT_SALES_DD gets no default row — it is a fact table.
 -- ON CONFLICT DO NOTHING makes this safe to re-run.
 -- -------------------------------------------------------------------------
@@ -43,11 +46,11 @@ INSERT INTO BL_DM.DIM_PRODUCTS
      product_category_id, product_category_name,
      insert_dt, update_dt)
 VALUES
-    (-1, 'Manual', 'Manual', 'Manual',
-     'Manual', 'Manual', -1, -1,
-     'Manual', -1, 'Manual',
-     -1, 'Manual',
-     -1, 'Manual',
+    (-1, 'n.a.', 'Manual', 'Manual',
+     'n.a.', 'n.a.', -1, -1,
+     'n.a.', -1, 'n.a.',
+     -1, 'n.a.',
+     -1, 'n.a.',
      CURRENT_DATE, CURRENT_DATE)
 ON CONFLICT (product_surr_id) DO NOTHING;
 
@@ -58,9 +61,9 @@ INSERT INTO BL_DM.DIM_EMPLOYEES
      email, sales_quota, performance_tier,
      insert_dt, update_dt)
 VALUES
-    (-1, 'Manual', 'Manual', 'Manual',
-     'Not Applicable', 'Manual', 'Manual', DATE '1900-01-01',
-     'Manual', -1, 'Manual',
+    (-1, 'n.a.', 'Manual', 'Manual',
+     'n.a.', 'n.a.', 'n.a.', DATE '1900-01-01',
+     'n.a.', -1, 'n.a.',
      CURRENT_DATE, CURRENT_DATE)
 ON CONFLICT (employee_surr_id) DO NOTHING;
 
@@ -70,8 +73,8 @@ INSERT INTO BL_DM.DIM_CHANNELS
      channel_name, originating_system_name,
      insert_dt, update_dt)
 VALUES
-    (-1, 'Manual', 'Manual', 'Manual',
-     'Manual', 'Manual',
+    (-1, 'n.a.', 'Manual', 'Manual',
+     'n.a.', 'n.a.',
      CURRENT_DATE, CURRENT_DATE)
 ON CONFLICT (channel_surr_id) DO NOTHING;
 
@@ -83,10 +86,10 @@ INSERT INTO BL_DM.DIM_PAYMENT_METHODS
      minimum_transaction_amount, availability_channel,
      insert_dt, update_dt)
 VALUES
-    (-1, 'Manual', 'Manual', 'Manual',
-     'Manual', 'Manual', -1,
-     -1, 'Manual', 'Manual',
-     -1, 'Manual',
+    (-1, 'n.a.', 'Manual', 'Manual',
+     'n.a.', 'n.a.', -1,
+     -1, 'n.a.', 'n.a.',
+     -1, 'n.a.',
      CURRENT_DATE, CURRENT_DATE)
 ON CONFLICT (payment_method_surr_id) DO NOTHING;
 
@@ -98,10 +101,10 @@ INSERT INTO BL_DM.DIM_SHIPPING_TYPES
      max_package_weight_kg, international_shipping_available,
      insert_dt, update_dt)
 VALUES
-    (-1, 'Manual', 'Manual', 'Manual',
-     'Manual', 'Manual', 'Manual',
-     'Manual', 'Manual', 'Manual',
-     -1, 'Manual',
+    (-1, 'n.a.', 'Manual', 'Manual',
+     'n.a.', 'n.a.', 'n.a.',
+     'n.a.', 'n.a.', 'n.a.',
+     -1, 'n.a.',
      CURRENT_DATE, CURRENT_DATE)
 ON CONFLICT (shipping_type_surr_id) DO NOTHING;
 
@@ -113,9 +116,9 @@ INSERT INTO BL_DM.DIM_PAYMENT_TERMS
      terms_effective_date_dt,
      insert_dt, update_dt)
 VALUES
-    (-1, 'Manual', 'Manual', 'Manual',
-     'Manual', -1, -1,
-     -1, 'Manual', 'Manual',
+    (-1, 'n.a.', 'Manual', 'Manual',
+     'n.a.', -1, -1,
+     -1, 'n.a.', 'n.a.',
      DATE '1900-01-01',
      CURRENT_DATE, CURRENT_DATE)
 ON CONFLICT (payment_terms_surr_id) DO NOTHING;
@@ -129,26 +132,14 @@ INSERT INTO BL_DM.DIM_CUSTOMERS_SCD
      budget_code, city_id, city_name, country_id, country_name,
      start_dt, end_dt, is_active, insert_dt)
 VALUES
-    (-1, 'Manual', 'Manual', 'Manual',
-     'Manual', 'Not Applicable', DATE '1900-01-01', 'Manual',
-     'Manual', 'Manual', 'Manual', 'Manual',
-     'Manual', DATE '1900-01-01', -1, 'Manual',
-     'Manual', -1, 'Manual', -1, 'Manual',
+    (-1, 'n.a.', 'Manual', 'Manual',
+     'n.a.', 'n.a.', DATE '1900-01-01', 'n.a.',
+     'n.a.', 'n.a.', 'n.a.', 'n.a.',
+     'n.a.', DATE '1900-01-01', -1, 'n.a.',
+     'n.a.', -1, 'n.a.', -1, 'n.a.',
      DATE '1900-01-01', DATE '9999-12-31', 'N', CURRENT_DATE)
 ON CONFLICT (customer_surr_id) DO NOTHING;
 
--- DIM_TIME_DAY default row
--- Using '1900-01-01' keeps it outside the generate_series range (2015-2030),
--- so it won't conflict with the UNIQUE constraint on date_dt.
-INSERT INTO BL_DM.DIM_TIME_DAY
-    (time_day_surr_id, date_dt, day_no, month_no, quarter_no, year_no, week_no,
-     day_name, month_name, is_weekend,
-     insert_dt, update_dt)
-VALUES
-    (-1, DATE '1900-01-01', -1, -1, -1, -1, -1,
-     'Manual', 'Manual', 'N',
-     CURRENT_DATE, CURRENT_DATE)
-ON CONFLICT (time_day_surr_id) DO NOTHING;
 
 COMMIT;
 
@@ -471,7 +462,7 @@ INSERT INTO BL_DM.DIM_TIME_DAY
      day_name, month_name, is_weekend,
      insert_dt, update_dt)
 SELECT
-    NEXTVAL('BL_DM.SEQ_DIM_TIME_DAY_ID'),
+    TO_CHAR(d, 'YYYYMMDD')::BIGINT,
     d::DATE,
     EXTRACT(DAY     FROM d)::INT,
     EXTRACT(MONTH   FROM d)::INT,
