@@ -30,12 +30,12 @@
 -- ----------------------------------------------------------------------------
 -- 1.a  Grants
 -- ----------------------------------------------------------------------------
-GRANT USAGE  ON SCHEMA BL_3NF TO CURRENT_USER;
-GRANT SELECT ON ALL TABLES IN SCHEMA BL_3NF TO CURRENT_USER;
+GRANT USAGE  ON SCHEMA BL_3NF TO BL_CL;
+GRANT SELECT ON ALL TABLES IN SCHEMA BL_3NF TO BL_CL;
 
-GRANT USAGE  ON SCHEMA BL_DM TO CURRENT_USER;
-GRANT ALL    ON ALL TABLES    IN SCHEMA BL_DM TO CURRENT_USER;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA BL_DM TO CURRENT_USER;
+GRANT USAGE  ON SCHEMA BL_DM TO BL_CL;
+GRANT ALL    ON ALL TABLES    IN SCHEMA BL_DM TO BL_CL;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA BL_DM TO BL_CL;
 
 -- ----------------------------------------------------------------------------
 -- 1.b  Logging / metadata table
@@ -51,58 +51,8 @@ CREATE TABLE IF NOT EXISTS BL_CL.MTA_LOAD_LOG (
     error_message   TEXT,
     CONSTRAINT PK_MTA_LOAD_LOG PRIMARY KEY (log_id)
 );
-
 -- ----------------------------------------------------------------------------
--- 1.c  Composite types
--- Required by the task ("Use composite types — one or more procedures").
--- ----------------------------------------------------------------------------
-DROP TYPE IF EXISTS BL_CL.t_dim_product_row CASCADE;
-CREATE TYPE BL_CL.t_dim_product_row AS (
-    v_product_src_id         VARCHAR(20),
-    v_source_system          VARCHAR(40),
-    v_source_entity          VARCHAR(60),
-    v_sku                    VARCHAR(20),
-    v_brand                  VARCHAR(50),
-    v_warranty_period_months INT,
-    v_launch_year            INT,
-    v_bulk_packaging_unit    VARCHAR(50),
-    v_minimum_order_quantity INT,
-    v_product_status         VARCHAR(20),
-    v_product_type_id        INT,
-    v_product_type_name      VARCHAR(50),
-    v_product_category_id    INT,
-    v_product_category_name  VARCHAR(50)
-);
-
-DROP TYPE IF EXISTS BL_CL.t_dim_customer_row CASCADE;
-CREATE TYPE BL_CL.t_dim_customer_row AS (
-    v_customer_src_id      VARCHAR(60),
-    v_source_system        VARCHAR(40),
-    v_source_entity        VARCHAR(60),
-    v_customer_type        VARCHAR(10),
-    v_customer_name        VARCHAR(255),
-    v_date_of_birth_dt     DATE,
-    v_gender               VARCHAR(10),
-    v_loyalty_member       VARCHAR(10),
-    v_customer_segment     VARCHAR(20),
-    v_industry              VARCHAR(50),
-    v_account_tier         VARCHAR(10),
-    v_company_size         VARCHAR(20),
-    v_onboarding_date_dt   DATE,
-    v_credit_limit         NUMERIC(12,2),
-    v_approver_name        VARCHAR(255),
-    v_budget_code          VARCHAR(20),
-    v_city_id              BIGINT,
-    v_city_name            VARCHAR(100),
-    v_country_id           INT,
-    v_country_name         VARCHAR(100),
-    v_start_dt             DATE,
-    v_end_dt               DATE,
-    v_is_active            VARCHAR(1)
-);
-
--- ----------------------------------------------------------------------------
--- 1.d  UNIQUE constraints on DIM source triplets
+-- 1.c  UNIQUE constraints on DIM source triplets
 -- Required as ON CONFLICT ON CONSTRAINT targets for the SCD-1 upserts below.
 -- ----------------------------------------------------------------------------
 DO $$
@@ -191,6 +141,40 @@ $$;
 --                        per row with parameter binding
 --   ④ Upsert          — ON CONFLICT ON CONSTRAINT uq_dim_products_src DO UPDATE
 -- ============================================================================
+
+-- ① Composite type used by prc_load_dim_products below.
+-- PL/pgSQL has no syntax for declaring a composite TYPE inside a DECLARE
+-- block, so it still has to be a schema-level object — but it now lives
+-- right next to the procedure that uses it (instead of a separate global
+-- "types" section), and it is created only if missing, so the script never
+-- needs a DROP TYPE / CREATE TYPE cycle to be re-runnable.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_type t
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE t.typname = 't_dim_product_row' AND n.nspname = 'bl_cl'
+    ) THEN
+        CREATE TYPE BL_CL.t_dim_product_row AS (
+            v_product_src_id         VARCHAR(20),
+            v_source_system          VARCHAR(40),
+            v_source_entity          VARCHAR(60),
+            v_sku                    VARCHAR(20),
+            v_brand                  VARCHAR(50),
+            v_warranty_period_months INT,
+            v_launch_year            INT,
+            v_bulk_packaging_unit    VARCHAR(50),
+            v_minimum_order_quantity INT,
+            v_product_status         VARCHAR(20),
+            v_product_type_id        INT,
+            v_product_type_name      VARCHAR(50),
+            v_product_category_id    INT,
+            v_product_category_name  VARCHAR(50)
+        );
+    END IF;
+END;
+$$;
+
 CREATE OR REPLACE PROCEDURE BL_CL.prc_load_dim_products()
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -237,7 +221,7 @@ BEGIN
         -1, '-1', 'Manual', 'Manual',
         'Manual', 'Manual', -1, -1, 'Manual', -1, 'Manual',
         -1, 'Manual', -1, 'Manual',
-        CURRENT_DATE, CURRENT_DATE
+        DATE '1900-01-01', DATE '9999-12-31'
     ) ON CONFLICT DO NOTHING;
 
     -- ③ Assemble the dynamic upsert string once outside the loop.
@@ -340,7 +324,7 @@ BEGIN
         -1, '-1', 'Manual', 'Manual',
         'Not Applicable', 'Manual', 'Manual', DATE '1900-01-01',
         'Manual', -1, 'Manual',
-        CURRENT_DATE, CURRENT_DATE
+        DATE '1900-01-01', DATE '9999-12-31'
     ) ON CONFLICT DO NOTHING;
 
     -- Cursor FOR loop — implicit cursor; OPEN / FETCH / CLOSE handled by PG
@@ -420,7 +404,7 @@ BEGIN
         insert_dt, update_dt
     ) VALUES (
         -1, '-1', 'Manual', 'Manual', 'Manual', 'Manual',
-        CURRENT_DATE, CURRENT_DATE
+        DATE '1900-01-01', DATE '9999-12-31'
     ) ON CONFLICT DO NOTHING;
 
     FOR v_rec IN
@@ -486,7 +470,7 @@ BEGIN
     ) VALUES (
         -1, '-1', 'Manual', 'Manual',
         'Manual', 'Manual', -1, -1, 'Manual', 'Manual', -1, 'Manual',
-        CURRENT_DATE, CURRENT_DATE
+        DATE '1900-01-01', DATE '9999-12-31'
     ) ON CONFLICT DO NOTHING;
 
     FOR v_rec IN
@@ -570,7 +554,7 @@ BEGIN
     ) VALUES (
         -1, '-1', 'Manual', 'Manual',
         'Manual', 'Manual', 'Manual', 'Manual', 'Manual', 'Manual', -1, 'Manual',
-        CURRENT_DATE, CURRENT_DATE
+        DATE '1900-01-01', DATE '9999-12-31'
     ) ON CONFLICT DO NOTHING;
 
     FOR v_rec IN
@@ -654,7 +638,7 @@ BEGIN
     ) VALUES (
         -1, '-1', 'Manual', 'Manual',
         'Manual', -1, -1, -1, 'Manual', 'Manual', DATE '1900-01-01',
-        CURRENT_DATE, CURRENT_DATE
+        DATE '1900-01-01', DATE '9999-12-31'
     ) ON CONFLICT DO NOTHING;
 
     FOR v_rec IN
@@ -742,7 +726,7 @@ BEGIN
         'Manual', 'Manual', 'Manual', 'Manual', 'Manual',
         DATE '1900-01-01', -1, 'Manual', 'Manual',
         -1, 'Manual', -1, 'Manual',
-        DATE '1900-01-01', DATE '9999-12-31', 'Y', CURRENT_DATE
+        DATE '1900-01-01', DATE '9999-12-31', 'Y', DATE '1900-01-01'
     ) ON CONFLICT DO NOTHING;
 
     -- Step 1: Close outdated open DM versions (batch UPDATE)
@@ -829,20 +813,12 @@ LANGUAGE plpgsql AS $$
 DECLARE
     v_inserted INT;
 BEGIN
-    -- Default row
-    INSERT INTO BL_DM.DIM_TIME_DAY (
-        time_day_surr_id, date_dt,
-        day_no, month_no, quarter_no, year_no, week_no,
-        day_name, month_name, is_weekend,
-        insert_dt, update_dt
-    ) VALUES (
-        -1, DATE '1900-01-01',
-        -1, -1, -1, -1, -1,
-        'n.a.', 'n.a.', 'N',
-        CURRENT_DATE, CURRENT_DATE
-    ) ON CONFLICT DO NOTHING;
-
-    -- Single batch INSERT for all dates (2015-01-01 … 2030-12-31)
+    -- No default (-1) row here: DIM_TIME_DAY is fully generated below and
+    -- contains every valid date in the required range, so a placeholder
+    -- "unknown date" row is redundant (unlike the other dimensions, which
+    -- may legitimately have unresolved/unmapped source keys).
+    
+-- Single batch INSERT for all dates (2015-01-01 … 2030-12-31)
     INSERT INTO BL_DM.DIM_TIME_DAY (
         time_day_surr_id, date_dt,
         day_no, month_no, quarter_no, year_no, week_no,
